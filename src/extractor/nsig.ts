@@ -63,11 +63,12 @@ async function downloadPlayerJs(playerUrl: string): Promise<string> {
 async function initSolver(): Promise<((input: unknown) => unknown) | null> {
   if (solverFn) return solverFn;
 
-  // Find the core solver script
+  // Find the core solver script (bundled in ytgrab/vendor)
   const searchPaths = [
-    path.resolve(__dirname, '../../../../yt-dlp/yt_dlp/extractor/youtube/jsc/_builtin/vendor'),
-    path.resolve(process.cwd(), '../yt-dlp/yt_dlp/extractor/youtube/jsc/_builtin/vendor'),
+    path.resolve(__dirname, '../../vendor'),
+    path.resolve(__dirname, '../../../vendor'),
     path.resolve(process.cwd(), 'vendor'),
+    path.resolve(process.cwd(), 'node_modules/ytgrab/vendor'),
   ];
 
   let coreScript: string | null = null;
