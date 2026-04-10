@@ -398,6 +398,7 @@ export class YoutubeIE extends InfoExtractor {
       'X-YouTube-Client-Version': String(client.INNERTUBE_CONTEXT.client.clientVersion),
       'Origin': `https://${host}`,
       'Referer': `https://${host}/`,
+      ...this._httpHeaders,
     };
 
     this._log(`Fetching ${endpoint} via ${clientName} client`, videoId);

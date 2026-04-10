@@ -1,6 +1,6 @@
 {
   "name": "ytgrab",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "A Node.js YouTube video downloader ported from yt-dlp",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

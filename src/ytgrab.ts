@@ -40,6 +40,17 @@ export class YtGrab {
       ...options,
     };
 
+    // Support cookies from options or YOUTUBE_COOKIES environment variable
+    const cookieStr = this.params.cookies || process.env.YOUTUBE_COOKIES;
+    if (cookieStr) {
+      // Parse Netscape cookie file format into a Cookie header string
+      const cookieHeader = this._parseCookieFile(cookieStr);
+      if (cookieHeader) {
+        if (!this.params.httpHeaders) this.params.httpHeaders = {};
+        (this.params.httpHeaders as Record<string, string>)['Cookie'] = cookieHeader;
+      }
+    }
+
     // Register extractors
     this._extractors = [
       new YoutubeIE(),
@@ -466,6 +477,24 @@ export class YtGrab {
 
     printSubs('Manual subtitles', info.subtitles || {});
     printSubs('Automatic captions', info.automatic_captions || {});
+  }
+
+  // --- Cookie parsing ---
+
+  private _parseCookieFile(content: string): string | null {
+    const cookies: string[] = [];
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const parts = trimmed.split('\t');
+      if (parts.length >= 7) {
+        // Netscape format: domain, flag, path, secure, expiry, name, value
+        const name = parts[5];
+        const value = parts[6];
+        cookies.push(`${name}=${value}`);
+      }
+    }
+    return cookies.length > 0 ? cookies.join('; ') : null;
   }
 
   // --- Extractor lookup ---
