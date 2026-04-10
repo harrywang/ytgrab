@@ -1,6 +1,6 @@
 {
   "name": "ytgrab",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A Node.js YouTube video downloader ported from yt-dlp",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -36,7 +36,8 @@
   "dependencies": {
     "astring": "^1.9.0",
     "got-scraping": "^4.2.1",
-    "meriyah": "^6.1.4"
+    "meriyah": "^6.1.4",
+    "mux.js": "^6.3.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

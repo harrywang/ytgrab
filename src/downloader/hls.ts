@@ -1,6 +1,7 @@
 /**
  * HLS (M3U8) Downloader - ported from yt_dlp/downloader/hls.py
  * Downloads HTTP Live Streaming content by fetching fragments.
+ * Uses mux.js for pure-JS TS→MP4 transmuxing (no FFmpeg required).
  */
 
 import * as fs from 'node:fs';
@@ -33,10 +34,9 @@ export class HlsFD extends FileDownloader {
 
     this._log(`Downloading ${fragments.length} fragments`);
 
-    const tmpFilename = this.tempName(filename);
-    const stream = fs.createWriteStream(tmpFilename);
     const startTime = Date.now();
     let downloadedBytes = 0;
+    const tsChunks: Buffer[] = [];
 
     for (let i = 0; i < fragments.length; i++) {
       const frag = fragments[i];
@@ -53,7 +53,7 @@ export class HlsFD extends FileDownloader {
           throw new Error(`HTTP ${resp.status} for fragment ${i + 1}`);
         }
 
-        stream.write(resp.body);
+        tsChunks.push(resp.body);
         downloadedBytes += resp.body.length;
 
         this._hookProgress({
@@ -72,26 +72,73 @@ export class HlsFD extends FileDownloader {
       }
     }
 
-    await new Promise<void>((resolve, reject) => {
-      stream.end(() => {
-        try {
-          if (fs.existsSync(filename)) fs.unlinkSync(filename);
-          fs.renameSync(tmpFilename, filename);
-          resolve();
-        } catch {
-          try {
-            fs.copyFileSync(tmpFilename, filename);
-            fs.unlinkSync(tmpFilename);
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        }
-      });
-    });
+    // Transmux TS→MP4 using mux.js (pure JS, no FFmpeg)
+    const tsData = Buffer.concat(tsChunks);
+
+    if (filename.endsWith('.mp4')) {
+      try {
+        const mp4Data = await this._transmuxToMp4(tsData);
+        fs.writeFileSync(filename, mp4Data);
+        downloadedBytes = mp4Data.length;
+        this._log('Transmuxed to MP4');
+      } catch (err) {
+        this._log(`Transmux failed: ${(err as Error).message} - saving raw TS`);
+        fs.writeFileSync(filename, tsData);
+      }
+    } else {
+      fs.writeFileSync(filename, tsData);
+    }
 
     this.reportFinished(filename, downloadedBytes);
     return true;
+  }
+
+  private async _transmuxToMp4(tsData: Buffer): Promise<Buffer> {
+    // Dynamic import to avoid issues with ESM/CJS
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const muxjs = require('mux.js') as typeof import('mux.js');
+    const Transmuxer = (muxjs as any).mp4?.Transmuxer || (muxjs as any).default?.mp4?.Transmuxer;
+
+    if (!Transmuxer) {
+      throw new Error('mux.js Transmuxer not found');
+    }
+
+    return new Promise<Buffer>((resolve, reject) => {
+      const transmuxer = new Transmuxer();
+      const outputChunks: Uint8Array[] = [];
+      let initSegment: Uint8Array | null = null;
+
+      transmuxer.on('data', (segment: { initSegment: Uint8Array; data: Uint8Array }) => {
+        if (!initSegment) {
+          initSegment = segment.initSegment;
+          outputChunks.push(segment.initSegment);
+        }
+        outputChunks.push(segment.data);
+      });
+
+      transmuxer.on('done', () => {
+        if (outputChunks.length === 0) {
+          reject(new Error('No output from transmuxer'));
+          return;
+        }
+        const totalLen = outputChunks.reduce((sum, c) => sum + c.length, 0);
+        const result = Buffer.alloc(totalLen);
+        let offset = 0;
+        for (const chunk of outputChunks) {
+          result.set(chunk, offset);
+          offset += chunk.length;
+        }
+        resolve(result);
+      });
+
+      transmuxer.on('error', (err: Error) => {
+        reject(err);
+      });
+
+      // Feed all TS data and flush
+      transmuxer.push(new Uint8Array(tsData));
+      transmuxer.flush();
+    });
   }
 
   private _parseMediaPlaylist(manifest: string, baseUrl: string): { url: string; duration: number }[] {
