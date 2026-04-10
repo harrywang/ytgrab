@@ -12,6 +12,7 @@ import { makeRequest } from '../networking/index.js';
 
 // Cache
 const nResultCache = new Map<string, Map<string, string>>();
+const sigResultCache = new Map<string, Map<string, string>>();
 const playerJsCache = new Map<string, string>();
 let solverFn: ((input: unknown) => unknown) | null = null;
 
@@ -106,11 +107,13 @@ async function initSolver(): Promise<((input: unknown) => unknown) | null> {
 }
 
 /**
- * Solve n-parameter challenges using the EJS solver.
+ * Solve challenges using the EJS solver.
+ * @param challengeType - 'n' for n-parameter or 'sig' for signature decryption
  */
-async function solveNWithEJS(
+async function solveWithEJS(
   playerUrl: string,
   challenges: string[],
+  challengeType: 'n' | 'sig' = 'n',
 ): Promise<Map<string, string>> {
   const solver = await initSolver();
   if (!solver) return new Map();
@@ -121,7 +124,7 @@ async function solveNWithEJS(
     const output = solver({
       type: 'player',
       player: playerJs,
-      requests: [{ type: 'n', challenges }],
+      requests: [{ type: challengeType, challenges }],
       output_preprocessed: false,
     }) as { type: string; error?: string; responses?: Array<{ type: string; data?: Record<string, string>; error?: string }> };
 
@@ -145,19 +148,39 @@ async function solveNWithEJS(
  * Solve the n-parameter challenge for a given video URL.
  */
 export async function solveNChallenge(formatUrl: string, playerUrl: string): Promise<string> {
+  // Support both query-string and path-style n parameters
+  // Query string: ?n=value or &n=value
+  // Path style: /n/value/ (used in HLS manifest URLs)
+  let nParam: string | null = null;
+  let isPathStyle = false;
+
   const url = new URL(formatUrl);
-  const nParam = url.searchParams.get('n');
+  nParam = url.searchParams.get('n');
+
+  if (!nParam) {
+    // Check for path-style n parameter: /n/<value>/
+    const pathMatch = formatUrl.match(/\/n\/([a-zA-Z0-9_-]+)/);
+    if (pathMatch) {
+      nParam = pathMatch[1];
+      isPathStyle = true;
+    }
+  }
+
   if (!nParam) return formatUrl;
 
   // Check cache
   const cached = nResultCache.get(playerUrl);
   if (cached?.has(nParam)) {
-    url.searchParams.set('n', cached.get(nParam)!);
+    const solved = cached.get(nParam)!;
+    if (isPathStyle) {
+      return formatUrl.replace(`/n/${nParam}`, `/n/${solved}`);
+    }
+    url.searchParams.set('n', solved);
     return url.toString();
   }
 
   // Solve with EJS
-  const results = await solveNWithEJS(playerUrl, [nParam]);
+  const results = await solveWithEJS(playerUrl, [nParam], 'n');
   if (results.size > 0) {
     if (!nResultCache.has(playerUrl)) nResultCache.set(playerUrl, new Map());
     for (const [k, v] of results) {
@@ -165,6 +188,9 @@ export async function solveNChallenge(formatUrl: string, playerUrl: string): Pro
     }
     const solved = results.get(nParam);
     if (solved) {
+      if (isPathStyle) {
+        return formatUrl.replace(`/n/${nParam}`, `/n/${solved}`);
+      }
       url.searchParams.set('n', solved);
       return url.toString();
     }
@@ -173,8 +199,31 @@ export async function solveNChallenge(formatUrl: string, playerUrl: string): Pro
   return formatUrl;
 }
 
+/**
+ * Decrypt a YouTube signature cipher using the EJS solver.
+ */
+export async function solveSignature(encryptedSig: string, playerUrl: string): Promise<string | null> {
+  // Check cache
+  const cached = sigResultCache.get(playerUrl);
+  if (cached?.has(encryptedSig)) {
+    return cached.get(encryptedSig)!;
+  }
+
+  const results = await solveWithEJS(playerUrl, [encryptedSig], 'sig');
+  if (results.size > 0) {
+    if (!sigResultCache.has(playerUrl)) sigResultCache.set(playerUrl, new Map());
+    for (const [k, v] of results) {
+      sigResultCache.get(playerUrl)!.set(k, v);
+    }
+    return results.get(encryptedSig) || null;
+  }
+
+  return null;
+}
+
 export function clearNSigCache(): void {
   nResultCache.clear();
+  sigResultCache.clear();
   playerJsCache.clear();
   solverFn = null;
 }

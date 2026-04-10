@@ -42,9 +42,16 @@ export class HlsFD extends FileDownloader {
       const frag = fragments[i];
       try {
         const resp = await makeRequest(frag.url, {
-          headers: (infoDict.http_headers as Record<string, string>) ?? {},
+          headers: {
+            ...(infoDict.http_headers as Record<string, string>) ?? {},
+            'Accept-Encoding': 'identity', // Don't compress binary TS segments
+          },
           timeout: 60000,
         });
+
+        if (resp.status >= 400) {
+          throw new Error(`HTTP ${resp.status} for fragment ${i + 1}`);
+        }
 
         stream.write(resp.body);
         downloadedBytes += resp.body.length;
@@ -59,7 +66,9 @@ export class HlsFD extends FileDownloader {
         });
       } catch (err) {
         this._log(`Fragment ${i + 1}/${fragments.length} failed: ${(err as Error).message}`);
-        // Continue with next fragment
+        // For 403 errors, abort immediately (likely n-param issue)
+        if ((err as Error).message.includes('403')) throw err;
+        // For other errors (network), continue
       }
     }
 

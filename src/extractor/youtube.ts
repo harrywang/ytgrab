@@ -14,7 +14,7 @@ import {
   sanitizeFilename, parseCodecs, orderedSet, filterDict,
 } from '../utils/index.js';
 import type { InfoDict, VideoFormat, Subtitle, Thumbnail, Chapter } from '../types.js';
-import { extractPlayerUrl, solveNChallenge } from './nsig.js';
+import { extractPlayerUrl, solveNChallenge, solveSignature } from './nsig.js';
 import { makeRequest as nsigMakeRequest } from '../networking/index.js';
 
 // --- InnerTube Client Definitions ---
@@ -264,8 +264,11 @@ export class YoutubeIE extends InfoExtractor {
     const allFormats: VideoFormat[] = [];
     const allSubtitles: Record<string, Subtitle[]> = {};
 
+    // Extract player URL early so it's available for signature decryption
+    const playerUrl = webpage ? extractPlayerUrl(webpage) : null;
+
     for (const { response: pr, clientName } of playerResponses) {
-      const { formats, subtitles } = this._extractFormats(pr, videoId, clientName);
+      const { formats, subtitles } = await this._extractFormats(pr, videoId, clientName, playerUrl);
       allFormats.push(...formats);
       this._mergeSubtitles(allSubtitles, subtitles);
     }
@@ -292,7 +295,6 @@ export class YoutubeIE extends InfoExtractor {
     this._sortFormats(uniqueFormats);
 
     // Step 4b: Solve n-parameter challenges for format URLs
-    const playerUrl = webpage ? extractPlayerUrl(webpage) : null;
     if (playerUrl) {
       this._log('Solving n-parameter challenges', videoId);
       for (let i = 0; i < uniqueFormats.length; i++) {
@@ -619,11 +621,12 @@ export class YoutubeIE extends InfoExtractor {
 
   // --- Format extraction ---
 
-  private _extractFormats(
+  private async _extractFormats(
     playerResponse: Record<string, unknown>,
     videoId: string,
     clientName: string = 'web',
-  ): { formats: VideoFormat[]; subtitles: Record<string, Subtitle[]> } {
+    playerUrl: string | null = null,
+  ): Promise<{ formats: VideoFormat[]; subtitles: Record<string, Subtitle[]> }> {
     const formats: VideoFormat[] = [];
     const subtitles: Record<string, Subtitle[]> = {};
 
@@ -644,14 +647,28 @@ export class YoutubeIE extends InfoExtractor {
         // Parse signature cipher
         const params = new URLSearchParams(signatureCipher);
         streamUrl = params.get('url');
-        // Note: Signature decryption requires JS player analysis
-        // For now, we try the URL as-is (works for some clients)
         const sig = params.get('s');
         const sp = params.get('sp') || 'signature';
         if (streamUrl && sig) {
-          // Without JS player, we can't decrypt. Skip encrypted formats.
-          this._warn(`Skipping encrypted format (itag ${fmt.itag}) - signature decryption not available`, videoId);
-          continue;
+          if (playerUrl) {
+            try {
+              const decryptedSig = await solveSignature(sig, playerUrl);
+              if (decryptedSig) {
+                const urlObj = new URL(streamUrl);
+                urlObj.searchParams.set(sp, decryptedSig);
+                streamUrl = urlObj.toString();
+              } else {
+                this._warn(`Failed to decrypt signature for format itag ${fmt.itag}`, videoId);
+                continue;
+              }
+            } catch {
+              this._warn(`Signature decryption error for format itag ${fmt.itag}`, videoId);
+              continue;
+            }
+          } else {
+            this._warn(`Skipping encrypted format (itag ${fmt.itag}) - no player URL`, videoId);
+            continue;
+          }
         }
       }
 
@@ -721,18 +738,71 @@ export class YoutubeIE extends InfoExtractor {
       formats.push(format);
     }
 
-    // HLS manifest
+    // HLS manifest - parse into individual quality levels
     const hlsUrl = strOrNone(streamingData.hlsManifestUrl);
     if (hlsUrl) {
-      // We'll parse HLS separately if needed
-      formats.push({
-        format_id: 'hls-manifest',
-        url: hlsUrl,
-        ext: 'mp4',
-        protocol: 'm3u8_native',
-        format_note: 'HLS manifest',
-        quality: -1,
-      });
+      try {
+        const hlsResp = await makeRequest(hlsUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15' },
+        });
+        const m3u8 = hlsResp.text();
+        const lines = m3u8.split('\n');
+        const seenResolutions = new Set<string>();
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith('#EXT-X-STREAM-INF:')) {
+            const streamUrl = lines[i + 1]?.trim();
+            if (!streamUrl || streamUrl.startsWith('#')) continue;
+
+            // Skip non-default audio tracks (dubbed audio)
+            if (line.includes('YT-EXT-AUDIO-CONTENT-ID')) continue;
+
+            const bwMatch = line.match(/BANDWIDTH=(\d+)/);
+            const resMatch = line.match(/RESOLUTION=(\d+)x(\d+)/);
+            const codecsMatch = line.match(/CODECS="([^"]+)"/);
+
+            if (!resMatch) continue;
+
+            const width = parseInt(resMatch[1]);
+            const height = parseInt(resMatch[2]);
+            const resKey = `${width}x${height}`;
+
+            // Only keep one stream per resolution (default audio track)
+            if (seenResolutions.has(resKey)) continue;
+            seenResolutions.add(resKey);
+
+            const bandwidth = bwMatch ? parseInt(bwMatch[1]) : 0;
+            const codecs = codecsMatch ? codecsMatch[1] : '';
+            const codecParts = codecs.split(',').map(c => c.trim());
+            const vcodec = codecParts.find(c => c.startsWith('avc1') || c.startsWith('vp9') || c.startsWith('av01')) || undefined;
+            const acodec = codecParts.find(c => c.startsWith('mp4a') || c.startsWith('opus')) || undefined;
+
+            formats.push({
+              format_id: `hls-${height}p`,
+              url: streamUrl,
+              ext: 'mp4',
+              width,
+              height,
+              tbr: Math.round(bandwidth / 1000),
+              vcodec: vcodec || undefined,
+              acodec: acodec || undefined,
+              protocol: 'm3u8_native',
+              format_note: `${height}p HLS`,
+            });
+          }
+        }
+      } catch {
+        // Fallback: keep raw manifest URL
+        formats.push({
+          format_id: 'hls-manifest',
+          url: hlsUrl,
+          ext: 'mp4',
+          protocol: 'm3u8_native',
+          format_note: 'HLS manifest',
+          quality: -1,
+        });
+      }
     }
 
     return { formats, subtitles };
