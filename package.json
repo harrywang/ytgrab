@@ -7,11 +7,16 @@
   "bin": {
     "ytgrab": "bin/ytgrab.js"
   },
+  "files": [
+    "dist",
+    "bin"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "node --test dist/**/*.test.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "youtube",
@@ -20,6 +25,10 @@
     "extractor",
     "stream"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/harrywang/ytgrab.git"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
