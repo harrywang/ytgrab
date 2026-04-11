@@ -5,11 +5,10 @@
  */
 
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { FileDownloader } from './common.js';
 import { makeRequest } from '../networking/index.js';
+import { fixMp4ForQuickTime } from './mp4fix.js';
 import type { InfoDict } from '../types.js';
-import { formatBytes } from '../utils/index.js';
 
 export class HlsFD extends FileDownloader {
   async realDownload(filename: string, infoDict: InfoDict): Promise<boolean> {
@@ -72,14 +71,16 @@ export class HlsFD extends FileDownloader {
       }
     }
 
-    // Transmux TS→MP4 using mux.js (pure JS, no FFmpeg)
+    // Transmux TS→MP4 using toMp4 (pure JS, no FFmpeg)
     const tsData = Buffer.concat(tsChunks);
 
     if (filename.endsWith('.mp4')) {
       try {
-        const mp4Data = await this._transmuxToMp4(tsData);
-        fs.writeFileSync(filename, mp4Data);
-        downloadedBytes = mp4Data.length;
+        const toMp4 = (await import('@invintusmedia/tomp4')).default;
+        const result = await toMp4(new Uint8Array(tsData));
+        const fixed = fixMp4ForQuickTime(Buffer.from(result.data));
+        fs.writeFileSync(filename, fixed);
+        downloadedBytes = fixed.length;
         this._log('Transmuxed to MP4');
       } catch (err) {
         this._log(`Transmux failed: ${(err as Error).message} - saving raw TS`);
@@ -91,54 +92,6 @@ export class HlsFD extends FileDownloader {
 
     this.reportFinished(filename, downloadedBytes);
     return true;
-  }
-
-  private async _transmuxToMp4(tsData: Buffer): Promise<Buffer> {
-    // Dynamic import to avoid issues with ESM/CJS
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const muxjs = require('mux.js') as typeof import('mux.js');
-    const Transmuxer = (muxjs as any).mp4?.Transmuxer || (muxjs as any).default?.mp4?.Transmuxer;
-
-    if (!Transmuxer) {
-      throw new Error('mux.js Transmuxer not found');
-    }
-
-    return new Promise<Buffer>((resolve, reject) => {
-      const transmuxer = new Transmuxer();
-      const outputChunks: Uint8Array[] = [];
-      let initSegment: Uint8Array | null = null;
-
-      transmuxer.on('data', (segment: { initSegment: Uint8Array; data: Uint8Array }) => {
-        if (!initSegment) {
-          initSegment = segment.initSegment;
-          outputChunks.push(segment.initSegment);
-        }
-        outputChunks.push(segment.data);
-      });
-
-      transmuxer.on('done', () => {
-        if (outputChunks.length === 0) {
-          reject(new Error('No output from transmuxer'));
-          return;
-        }
-        const totalLen = outputChunks.reduce((sum, c) => sum + c.length, 0);
-        const result = Buffer.alloc(totalLen);
-        let offset = 0;
-        for (const chunk of outputChunks) {
-          result.set(chunk, offset);
-          offset += chunk.length;
-        }
-        resolve(result);
-      });
-
-      transmuxer.on('error', (err: Error) => {
-        reject(err);
-      });
-
-      // Feed all TS data and flush
-      transmuxer.push(new Uint8Array(tsData));
-      transmuxer.flush();
-    });
   }
 
   private _parseMediaPlaylist(manifest: string, baseUrl: string): { url: string; duration: number }[] {
